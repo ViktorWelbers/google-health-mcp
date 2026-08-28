@@ -1,0 +1,63 @@
+name: image
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+# Superseded runs are pointless; keep main's so every commit reports.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE: ${{ github.repository }}
+
+jobs:
+  build:
+    # Explicitly amd64, not one of the macOS profiles: this image only ever runs
+    # on the k3s nodes, which are x86_64 Ubuntu. Namespace's Remote Builders
+    # build that natively, so there is no QEMU in the path.
+    runs-on: nscloud-ubuntu-22.04-amd64-4x8
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+
+      # Namespace's own buildx setup. docker/setup-buildx-action must NOT be
+      # used here — it overwrites the runner's default builder config and
+      # silently drops us off the Remote Builders.
+      - uses: namespacelabs/nscloud-setup-buildx-action@v0
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE }}
+          # Semver tags from git tags, plus a sha tag so every build is
+          # addressable by an immutable reference.
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,format=long
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ github.ref_type == 'tag' && github.ref_name || github.sha }}
+          # No cache-from/cache-to: Remote Builders keep the layer cache
+          # server-side, so a GHA cache backend would only add upload time.
