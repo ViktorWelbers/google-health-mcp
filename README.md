@@ -31,13 +31,39 @@ It deliberately does **not** interpret. There are no baselines, thresholds or ve
 
 ## Setup
 
-### 1. Google Cloud
+Each user self-hosts and registers their own OAuth client, so their token never
+leaves their machine. No app verification, no shared data custody.
 
-1. Create (or pick) a project in the [Google Cloud console](https://console.cloud.google.com/).
-2. Enable the **Google Health API**.
-3. Create an **OAuth 2.0 Client ID** of type *Web application*.
-4. Add `http://127.0.0.1:3000/callback` as an authorised redirect URI.
-5. Add yourself as a test user on the OAuth consent screen.
+### 1. Google Cloud (about five minutes, free)
+
+You are not deploying anything to Google Cloud — the console is just where OAuth
+clients are registered. No billing card is needed for consumer OAuth access.
+
+1. Create or select a project at [console.cloud.google.com](https://console.cloud.google.com).
+2. Enable the **Google Health API** (`health.googleapis.com`) from the API Library.
+3. **OAuth consent screen** → User Type **External**. Leave publishing status on **Testing**.
+4. Under **Test users**, click **+ Add users** and add your own Google account. Without this your own sign-in is rejected.
+5. **Credentials → Create credentials → OAuth client ID → Web application**.
+6. Under **Authorised redirect URIs** add exactly:
+
+   ```
+   http://127.0.0.1:3000/callback
+   ```
+
+   (Google's own quickstart suggests `https://www.google.com` — that is for the
+   OAuth Playground, not for this server.)
+7. Copy the **Client ID** and **Client Secret**.
+
+> **Testing-mode caveat.** While publishing status is *Testing*, Google expires
+> refresh tokens after 7 days, so you would re-run `login` weekly. Switching the
+> status to *In production* — still unverified — is expected to lift that while
+> keeping the "unverified app" warning screen and the 100-user cap. Worth
+> confirming for your own project before relying on it.
+>
+> Health API scopes are *restricted*, so a publicly verified app would need an
+> annual third-party CASA security assessment. Self-hosting sidesteps that
+> entirely: an unverified client supports up to 100 users, and you only ever
+> need one — yourself.
 
 ### 2. Authorise
 
@@ -49,7 +75,8 @@ go build -o health-mcp .
 ./health-mcp login
 ```
 
-This opens a browser, and writes a token to `~/.config/health-mcp/token.json` with mode `0600`. Override the location with `HEALTH_TOKEN_PATH`.
+This opens a browser, and writes a token to `~/.config/health-mcp/token.json`
+with mode `0600`. Override the location with `HEALTH_TOKEN_PATH`.
 
 Scopes requested (all read-only — the server never writes health data):
 
@@ -57,6 +84,13 @@ Scopes requested (all read-only — the server never writes health data):
 googlehealth.activity_and_fitness.readonly
 googlehealth.health_metrics_and_measurements.readonly
 googlehealth.sleep.readonly
+```
+
+Check it worked:
+
+```sh
+./health-mcp serve -http :8080 &
+curl -s localhost:8080/readyz     # "ready" once a usable token exists
 ```
 
 ### 3. Run
