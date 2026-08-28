@@ -45,7 +45,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: server
-          image: ghcr.io/viktorwelbers/google-health-mcp:latest
+          image: ghcr.io/viktorwelbers/google-health-mcp:0.1.0
           args: ["serve", "-http", ":8080"]
           ports:
             - name: http

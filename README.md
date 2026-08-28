@@ -99,9 +99,27 @@ claude mcp add google-health \
 
 ## Kubernetes / Container Deployment
 
-```sh
-docker build -t ghcr.io/viktorwelbers/google-health-mcp:latest .
+Images are published to GHCR for `linux/amd64`. No build step needed:
 
+```sh
+docker pull ghcr.io/viktorwelbers/google-health-mcp:0.1.0
+```
+
+Tags:
+
+* `0.1.0`, `0.1` — released versions, cut from `v*` git tags
+* `latest` — current `main`, moves on every push
+* `sha-<commit>` — immutable, one per build
+
+Pin a version tag in deployments. To build from source instead:
+
+```sh
+docker build -t google-health-mcp:dev .
+```
+
+Authorise with `health-mcp login` first, then deploy:
+
+```sh
 kubectl create secret generic google-health-mcp \
   --from-literal=client-id="$GOOGLE_CLIENT_ID" \
   --from-literal=client-secret="$GOOGLE_CLIENT_SECRET" \
@@ -113,6 +131,7 @@ kubectl apply -f k8s/deployment.yaml
 Container characteristics:
 
 * Runs non-root on `scratch`
+* 4.2 MB compressed: two layers, the static binary and the CA roots
 * Read-only root filesystem, dropped capabilities
 * Endpoints: `/healthz` (liveness), `/readyz` (readiness/auth check), `/mcp` (streamable HTTP)
 
