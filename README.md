@@ -130,14 +130,42 @@ Runs as non-root on `scratch` with a read-only root filesystem and all capabilit
 
 The token is mounted read-only. That's intentional: only the short-lived access token rotates and it's kept in memory, while the refresh token never changes, so a restart re-derives a valid access token. The server logs one warning per rotation about being unable to persist — expected and harmless.
 
-## Known soft spots
+## API notes
 
-Two things are inferred rather than copied from documentation, and both are isolated so they're easy to correct:
+Verified against the live API, because the reference docs leave these implicit:
 
-1. **`civilTimeInterval` JSON field names** (`client.go`) — the RPC reference describes it as "a counterpart of `google.type.Interval`, but using `CivilDateTime`" without spelling out the JSON. If a rollup returns `INVALID_ARGUMENT` about the range, look here first; the API's own error text is passed through verbatim.
-2. **Value field names per data type** (`metrics.go`) — the nested value key differs per type and isn't exhaustively documented, so extraction tries preferred keys and falls back to the first plausible number. Add entries to `preferredKeys` to pin one down.
+**`civilTimeInterval` uses `start` / `end`** — not the `startTime`/`endTime` of
+`google.type.Interval`, despite being documented as its counterpart.
 
-Use `health_list_datapoints` to inspect the real payload shape for any type.
+**`daily-*` types do not support `dailyRollUp`.** They are already one point per
+day, and the API rejects rollup with *"supported: list, reconcile"*. The client
+picks the method per type: `List` for `daily-*`, `dailyRollUp` for the rest.
+
+**Some numeric fields are quoted strings.** `daily-resting-heart-rate` returns
+`"beatsPerMinute": "59"`. Number parsing accepts both.
+
+**The date sits at a different depth per type.** Rollup points carry
+`civilStartTime` at the top level; daily types nest `date` inside their value
+object; sampled types bury it under `weight.sampleTime.civilTime.date`. Date
+extraction searches recursively rather than assuming a path.
+
+**Every numeric field is returned, not just one.** A data point often carries
+several useful numbers — `daily-heart-rate-variability` has an average, a
+deep-sleep RMSSD, an entropy value and a non-REM heart rate. All of them appear
+in `values`; `primary_field` only chooses which one fills the rendered column,
+so an unmapped type still returns its full data.
+
+Observed field names:
+
+| Data type | Primary field |
+| --- | --- |
+| `daily-resting-heart-rate` | `beatsPerMinute` |
+| `daily-heart-rate-variability` | `averageHeartRateVariabilityMilliseconds` |
+| `daily-oxygen-saturation` | `averagePercentage` |
+| `daily-sleep-temperature-derivations` | `nightlyTemperatureCelsius` (compare against `baselineTemperatureCelsius` in the same point) |
+| `weight` | `weightGrams` |
+
+Use `health_list_datapoints` to inspect the raw shape of any type.
 
 ## Licence
 

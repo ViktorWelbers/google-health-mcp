@@ -2,6 +2,7 @@ package main
 
 import (
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -20,15 +21,14 @@ var KnownDataTypes = []string{
 }
 
 // Presets are named bundles of data types — a convenience so a caller can ask
-// for "recovery" instead of listing four kebab-case strings. They group data;
-// they do not interpret it.
+// for "recovery" instead of listing kebab-case strings. They group data; they
+// do not interpret it.
 var Presets = map[string][]string{
 	"recovery": {
 		"daily-resting-heart-rate",
 		"daily-heart-rate-variability",
 		"daily-sleep-temperature-derivations",
 		"daily-oxygen-saturation",
-		"sleep",
 	},
 	"training": {
 		"active-zone-minutes",
@@ -41,7 +41,6 @@ var Presets = map[string][]string{
 		"weight",
 		"body-fat",
 		"vo2-max",
-		"blood-glucose",
 	},
 }
 
@@ -54,163 +53,164 @@ func presetNames() []string {
 	return names
 }
 
-// preferredKeys nudges value extraction toward the right field for types whose
-// rollup object carries several numbers. Purely mechanical — it decides which
-// number is "the" value, not what the value means.
-var preferredKeys = map[string][]string{
-	"daily-resting-heart-rate":            {"restingHeartRate", "bpm", "value"},
-	"daily-heart-rate-variability":        {"rmssd", "dailyRmssd", "value"},
-	"daily-sleep-temperature-derivations": {"temperatureDeviationCelsius", "deviationCelsius", "celsius", "value"},
-	"daily-oxygen-saturation":             {"averagePercentage", "percentage", "value"},
-	"sleep":                               {"totalSleepMinutes", "durationMinutes", "minutes"},
-	"weight":                              {"weightKilograms", "kilograms", "value"},
-	"steps":                               {"count", "steps", "value"},
+// primaryField names the value shown in the rendered table for each data type.
+// Confirmed against live API payloads. This only chooses a display column —
+// every numeric field is returned in structured output regardless, so a wrong
+// or missing entry here loses nothing.
+var primaryField = map[string]string{
+	"daily-resting-heart-rate":            "beatsPerMinute",
+	"daily-heart-rate-variability":        "averageHeartRateVariabilityMilliseconds",
+	"daily-oxygen-saturation":             "averagePercentage",
+	"daily-sleep-temperature-derivations": "nightlyTemperatureCelsius",
+	"weight":                              "weightGrams",
+	"body-fat":                            "percentage",
+	"steps":                               "count",
 }
 
 // ---------- extraction ----------
 
-// dayOf pulls the calendar date out of a rollup point's civilStartTime.
-func dayOf(point map[string]any) (time.Time, bool) {
-	for _, key := range []string{"civilStartTime", "startTime", "civilEndTime"} {
-		node, ok := point[key].(map[string]any)
-		if !ok {
-			continue
-		}
-		date, ok := node["date"].(map[string]any)
-		if !ok {
-			continue
-		}
-		y, ok1 := date["year"].(float64)
-		m, ok2 := date["month"].(float64)
-		d, ok3 := date["day"].(float64)
-		if ok1 && ok2 && ok3 {
-			return time.Date(int(y), time.Month(int(m)), int(d), 0, 0, 0, 0, time.UTC), true
-		}
-	}
-	return time.Time{}, false
-}
-
-// structuralKeys hold numbers but are never the metric itself.
+// structuralKeys hold numbers that describe position in time, never a metric.
 var structuralKeys = map[string]bool{
 	"year": true, "month": true, "day": true, "hours": true,
-	"minutes": true, "seconds": true, "nanos": true,
-	"civilStartTime": true, "civilEndTime": true, "dataSource": true,
+	"minutes": true, "seconds": true, "nanos": true, "utcOffset": true,
 }
 
-// extractValue finds the metric number inside a rollup point.
-//
-// The API returns a different value object per data type and the nested field
-// names are not exhaustively documented, so this tries preferred keys first and
-// otherwise takes the first plausible number. Being tolerant here is what lets
-// all 30+ data types work without per-type code.
-func extractValue(point map[string]any, prefer []string) (float64, bool) {
-	for _, key := range prefer {
-		if v, ok := searchKey(point, key); ok {
-			return v, true
-		}
-	}
-	return firstNumber(point)
-}
-
-func searchKey(node any, want string) (float64, bool) {
-	switch n := node.(type) {
-	case map[string]any:
-		for k, v := range n {
-			if strings.EqualFold(k, want) {
-				if f, ok := asNumber(v); ok {
-					return f, true
-				}
-			}
-		}
-		// Descend only after checking this level, so shallower matches win.
-		for k, v := range n {
-			if structuralKeys[k] {
-				continue
-			}
-			if f, ok := searchKey(v, want); ok {
-				return f, true
-			}
-		}
-	case []any:
-		for _, v := range n {
-			if f, ok := searchKey(v, want); ok {
-				return f, true
-			}
-		}
-	}
-	return 0, false
-}
-
-func firstNumber(node any) (float64, bool) {
-	switch n := node.(type) {
-	case map[string]any:
-		keys := make([]string, 0, len(n))
-		for k := range n {
-			if !structuralKeys[k] {
-				keys = append(keys, k)
-			}
-		}
-		sort.Strings(keys) // deterministic
-		for _, k := range keys {
-			if f, ok := asNumber(n[k]); ok {
-				return f, true
-			}
-		}
-		for _, k := range keys {
-			if f, ok := firstNumber(n[k]); ok {
-				return f, true
-			}
-		}
-	case []any:
-		for _, v := range n {
-			if f, ok := firstNumber(v); ok {
-				return f, true
-			}
-		}
-	}
-	return 0, false
-}
-
+// asNumber accepts JSON numbers and numeric strings. The API returns some
+// integer fields quoted — daily-resting-heart-rate reports "beatsPerMinute":"59".
 func asNumber(v any) (float64, bool) {
 	switch x := v.(type) {
 	case float64:
 		return x, true
 	case int:
 		return float64(x), true
+	case string:
+		if f, err := strconv.ParseFloat(strings.TrimSpace(x), 64); err == nil {
+			return f, true
+		}
 	}
 	return 0, false
+}
+
+// dayOf finds the calendar date for a data point.
+//
+// Placement varies: rollup points carry civilStartTime at the top level, daily
+// types nest date inside their value object (dailyRestingHeartRate.date), and
+// sampled types bury it deeper still (weight.sampleTime.civilTime.date). So
+// this searches recursively for the first object holding year/month/day.
+func dayOf(node any) (time.Time, bool) {
+	switch n := node.(type) {
+	case map[string]any:
+		y, ok1 := asNumber(n["year"])
+		m, ok2 := asNumber(n["month"])
+		d, ok3 := asNumber(n["day"])
+		if ok1 && ok2 && ok3 {
+			return time.Date(int(y), time.Month(int(m)), int(d), 0, 0, 0, 0, time.UTC), true
+		}
+		// Prefer an explicit date/civilStartTime branch before scanning the rest.
+		for _, k := range []string{"date", "civilStartTime", "civilTime", "sampleTime", "startTime"} {
+			if v, ok := n[k]; ok {
+				if t, ok := dayOf(v); ok {
+					return t, true
+				}
+			}
+		}
+		keys := make([]string, 0, len(n))
+		for k := range n {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			if t, ok := dayOf(n[k]); ok {
+				return t, true
+			}
+		}
+	case []any:
+		for _, v := range n {
+			if t, ok := dayOf(v); ok {
+				return t, true
+			}
+		}
+	}
+	return time.Time{}, false
+}
+
+// flattenNumbers collects every numeric leaf in a data point, keyed by its own
+// field name. Returning all of them removes any need to guess which field
+// "the" value is — the caller sees the lot.
+func flattenNumbers(node any, out map[string]float64) {
+	switch n := node.(type) {
+	case map[string]any:
+		for k, v := range n {
+			if structuralKeys[k] || k == "dataSource" {
+				continue
+			}
+			if f, ok := asNumber(v); ok {
+				// Keep the shallowest occurrence of a name.
+				if _, exists := out[k]; !exists {
+					out[k] = f
+				}
+				continue
+			}
+			flattenNumbers(v, out)
+		}
+	case []any:
+		for _, v := range n {
+			flattenNumbers(v, out)
+		}
+	}
 }
 
 // ---------- series ----------
 
 type dayValue struct {
-	Date  string  `json:"date"`
-	Value float64 `json:"value"`
+	Date   string             `json:"date"`
+	Value  float64            `json:"value"`
+	Field  string             `json:"field"`
+	Values map[string]float64 `json:"values,omitempty"`
 }
 
 // Series is one data type's day-by-day values over the requested window.
 // No baselines, no thresholds, no verdicts — the caller does the thinking.
 type Series struct {
 	DataType string     `json:"data_type"`
+	Field    string     `json:"primary_field,omitempty"`
 	Days     []dayValue `json:"days"`
 	Count    int        `json:"count"`
 	Error    string     `json:"error,omitempty"`
 }
 
 func newSeries(dataType string, points []map[string]any) Series {
-	s := Series{DataType: dataType}
+	s := Series{DataType: dataType, Field: primaryField[dataType]}
 	for _, p := range points {
 		d, ok := dayOf(p)
 		if !ok {
 			continue
 		}
-		v, ok := extractValue(p, preferredKeys[dataType])
-		if !ok {
+		nums := map[string]float64{}
+		flattenNumbers(p, nums)
+		if len(nums) == 0 {
 			continue
 		}
-		s.Days = append(s.Days, dayValue{Date: d.Format("2006-01-02"), Value: v})
+		dv := dayValue{Date: d.Format("2006-01-02"), Values: nums}
+
+		// Pick the display value: configured primary if present, else the
+		// alphabetically first field so the choice is at least deterministic.
+		if v, ok := nums[s.Field]; ok {
+			dv.Value, dv.Field = v, s.Field
+		} else {
+			keys := make([]string, 0, len(nums))
+			for k := range nums {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			dv.Value, dv.Field = nums[keys[0]], keys[0]
+		}
+		s.Days = append(s.Days, dv)
 	}
 	sort.Slice(s.Days, func(i, j int) bool { return s.Days[i].Date < s.Days[j].Date })
 	s.Count = len(s.Days)
+	if s.Field == "" && len(s.Days) > 0 {
+		s.Field = s.Days[0].Field
+	}
 	return s
 }
