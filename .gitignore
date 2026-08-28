@@ -1,0 +1,14 @@
+# Binaries
+/health-mcp
+/google-health-mcp
+/dist/
+
+# Secrets — never commit these
+token.json
+*.token.json
+.env
+.env.*
+!.env.example
+
+# OS
+.DS_Store
