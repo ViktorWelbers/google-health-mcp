@@ -39,11 +39,55 @@ func tokenPath() string {
 	return filepath.Join(home, ".config", "health-mcp", "token.json")
 }
 
+// clientFile matches the credentials JSON downloaded from the Google Cloud
+// console, which nests everything under "web" or "installed".
+type clientFile struct {
+	Web       *clientCreds `json:"web"`
+	Installed *clientCreds `json:"installed"`
+}
+
+type clientCreds struct {
+	ClientID     string `json:"client_id"`
+	ClientSecret string `json:"client_secret"`
+}
+
+// credsFromFile reads the console's downloaded credentials JSON, so the secret
+// lives in one 0600 file instead of being copied into shell profiles and
+// editor configs.
+func credsFromFile(path string) (string, string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", "", fmt.Errorf("reading %s: %w", path, err)
+	}
+	var cf clientFile
+	if err := json.Unmarshal(b, &cf); err != nil {
+		return "", "", fmt.Errorf("parsing %s: %w", path, err)
+	}
+	c := cf.Web
+	if c == nil {
+		c = cf.Installed
+	}
+	if c == nil || c.ClientID == "" || c.ClientSecret == "" {
+		return "", "", fmt.Errorf("%s has no web/installed client credentials", path)
+	}
+	return c.ClientID, c.ClientSecret, nil
+}
+
 func oauthConfig() (*oauth2.Config, error) {
 	id := os.Getenv("GOOGLE_CLIENT_ID")
 	secret := os.Getenv("GOOGLE_CLIENT_SECRET")
+
+	// A credentials file takes precedence, and is the tidier option: point
+	// GOOGLE_OAUTH_CLIENT_FILE at the JSON downloaded from the Cloud console.
+	if path := os.Getenv("GOOGLE_OAUTH_CLIENT_FILE"); path != "" {
+		var err error
+		if id, secret, err = credsFromFile(path); err != nil {
+			return nil, err
+		}
+	}
+
 	if id == "" || secret == "" {
-		return nil, fmt.Errorf("GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET must be set")
+		return nil, fmt.Errorf("set GOOGLE_OAUTH_CLIENT_FILE to the credentials JSON from the Cloud console, or GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET")
 	}
 	return &oauth2.Config{
 		ClientID:     id,

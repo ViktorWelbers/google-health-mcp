@@ -67,13 +67,21 @@ clients are registered. No billing card is needed for consumer OAuth access.
 
 ### 2. Authorise
 
+Point the server at the credentials JSON you downloaded from the console:
+
 ```sh
-export GOOGLE_CLIENT_ID=...
-export GOOGLE_CLIENT_SECRET=...
+mkdir -p ~/.config/health-mcp
+cp ~/Downloads/client_secret_*.json ~/.config/health-mcp/client.json
+chmod 600 ~/.config/health-mcp/client.json
+export GOOGLE_OAUTH_CLIENT_FILE=~/.config/health-mcp/client.json
 
 go build -o health-mcp .
 ./health-mcp login
 ```
+
+`GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` still work if you prefer env vars,
+but the file keeps the secret in one `0600` location instead of copying it into
+shell profiles and editor configs.
 
 This opens a browser, and writes a token to `~/.config/health-mcp/token.json`
 with mode `0600`. Override the location with `HEALTH_TOKEN_PATH`.

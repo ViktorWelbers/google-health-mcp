@@ -62,9 +62,10 @@ Usage:
   health-mcp version
 
 Environment:
-  GOOGLE_CLIENT_ID       OAuth client id       (required)
-  GOOGLE_CLIENT_SECRET   OAuth client secret   (required)
-  HEALTH_TOKEN_PATH      token location        (default ~/.config/health-mcp/token.json)
+  GOOGLE_OAUTH_CLIENT_FILE  credentials JSON from the Cloud console (preferred)
+  GOOGLE_CLIENT_ID          OAuth client id      (alternative to the file)
+  GOOGLE_CLIENT_SECRET      OAuth client secret  (alternative to the file)
+  HEALTH_TOKEN_PATH         token location       (default ~/.config/health-mcp/token.json)
 
 `, version)
 }
