@@ -1,0 +1,110 @@
+# google-health-mcp
+
+A small MCP server for the [Google Health API v4](https://developers.google.com/health) — the successor to the Fitbit Web API, covering Fitbit, Pixel Watch and partner devices.
+
+Single static Go binary, no runtime dependencies, ~15 MB container. Runs on stdio for local editors or over streamable HTTP for a cluster.
+
+## Design
+
+The server does **mechanical** work only:
+
+- OAuth, token refresh and persistence
+- Pagination, and chunking around the API's 14-day rollup ceiling
+- Collapsing verbose data-point JSON into `date, value` pairs
+
+It deliberately does **not** interpret. There are no baselines, thresholds or verdicts baked in — it returns numbers and the agent draws the conclusions. An agent asking about recovery already knows things the server can't: training load, symptoms, what happened last week. Hard-coding "resting HR is 5 bpm up, you may be ill" is both less accurate and un-changeable without a redeploy.
+
+## Tools
+
+| Tool | Purpose |
+| --- | --- |
+| `health_auth_status` | Is the server authorised, where is the token, when does it expire |
+| `health_data_types` | All 32 data types plus the named presets |
+| `health_daily_metrics` | Day-by-day values for one or more data types, as an aligned table |
+| `health_list_datapoints` | Raw data points with a pass-through AIP-160 `filter` — escape hatch |
+
+`health_daily_metrics` accepts either explicit `data_types` or a `preset`:
+
+- **`recovery`** — `daily-resting-heart-rate`, `daily-heart-rate-variability`, `daily-sleep-temperature-derivations`, `daily-oxygen-saturation`, `sleep`
+- **`training`** — `active-zone-minutes`, `active-energy-burned`, `total-calories`, `steps`, `exercise`
+- **`body`** — `weight`, `body-fat`, `vo2-max`, `blood-glucose`
+
+## Setup
+
+### 1. Google Cloud
+
+1. Create (or pick) a project in the [Google Cloud console](https://console.cloud.google.com/).
+2. Enable the **Google Health API**.
+3. Create an **OAuth 2.0 Client ID** of type *Web application*.
+4. Add `http://127.0.0.1:3000/callback` as an authorised redirect URI.
+5. Add yourself as a test user on the OAuth consent screen.
+
+### 2. Authorise
+
+```sh
+export GOOGLE_CLIENT_ID=...
+export GOOGLE_CLIENT_SECRET=...
+
+go build -o health-mcp .
+./health-mcp login
+```
+
+This opens a browser, and writes a token to `~/.config/health-mcp/token.json` with mode `0600`. Override the location with `HEALTH_TOKEN_PATH`.
+
+Scopes requested (all read-only — the server never writes health data):
+
+```
+googlehealth.activity_and_fitness.readonly
+googlehealth.health_metrics_and_measurements.readonly
+googlehealth.sleep.readonly
+```
+
+### 3. Run
+
+```sh
+./health-mcp serve                    # stdio
+./health-mcp serve -http :8080        # streamable HTTP at /mcp
+```
+
+Register with Claude Code:
+
+```sh
+claude mcp add google-health \
+  --env GOOGLE_CLIENT_ID=... \
+  --env GOOGLE_CLIENT_SECRET=... \
+  -- /path/to/health-mcp serve
+```
+
+## Cluster deployment
+
+```sh
+docker build -t ghcr.io/viktorwelbers/google-health-mcp:latest .
+
+kubectl create secret generic google-health-mcp \
+  --from-literal=client-id="$GOOGLE_CLIENT_ID" \
+  --from-literal=client-secret="$GOOGLE_CLIENT_SECRET" \
+  --from-file=token.json="$HOME/.config/health-mcp/token.json"
+
+kubectl apply -f k8s/deployment.yaml
+```
+
+Runs as non-root on `scratch` with a read-only root filesystem and all capabilities dropped.
+
+- `/healthz` — process is alive
+- `/readyz` — a usable token is present, so an unauthorised pod shows `NotReady` rather than failing silently
+- `/mcp` — the MCP endpoint
+
+The token is mounted read-only. That's intentional: only the short-lived access token rotates and it's kept in memory, while the refresh token never changes, so a restart re-derives a valid access token. The server logs one warning per rotation about being unable to persist — expected and harmless.
+
+## Known soft spots
+
+Two things are inferred rather than copied from documentation, and both are isolated so they're easy to correct:
+
+1. **`civilTimeInterval` JSON field names** (`client.go`) — the RPC reference describes it as "a counterpart of `google.type.Interval`, but using `CivilDateTime`" without spelling out the JSON. If a rollup returns `INVALID_ARGUMENT` about the range, look here first; the API's own error text is passed through verbatim.
+2. **Value field names per data type** (`metrics.go`) — the nested value key differs per type and isn't exhaustively documented, so extraction tries preferred keys and falls back to the first plausible number. Add entries to `preferredKeys` to pin one down.
+
+Use `health_list_datapoints` to inspect the real payload shape for any type.
+
+## Licence
+
+MIT

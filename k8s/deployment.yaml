@@ -1,0 +1,113 @@
+---
+# OAuth client credentials + the token produced by `health-mcp login`.
+#
+# Create it from your local token rather than committing anything:
+#
+#   kubectl create secret generic google-health-mcp \
+#     --from-literal=client-id="$GOOGLE_CLIENT_ID" \
+#     --from-literal=client-secret="$GOOGLE_CLIENT_SECRET" \
+#     --from-file=token.json="$HOME/.config/health-mcp/token.json"
+#
+# The mount is read-only, which is fine: only the short-lived access token
+# rotates and that is held in memory. The refresh token never changes, so the
+# server re-derives a valid access token on every restart. It logs one warning
+# per rotation about not being able to persist — expected, harmless.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: google-health-mcp
+type: Opaque
+stringData:
+  client-id: REPLACE_ME
+  client-secret: REPLACE_ME
+  token.json: "{}"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: google-health-mcp
+  labels:
+    app: google-health-mcp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: google-health-mcp
+  template:
+    metadata:
+      labels:
+        app: google-health-mcp
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: server
+          image: ghcr.io/viktorwelbers/google-health-mcp:latest
+          args: ["serve", "-http", ":8080"]
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: GOOGLE_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: google-health-mcp
+                  key: client-id
+            - name: GOOGLE_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: google-health-mcp
+                  key: client-secret
+            - name: HEALTH_TOKEN_PATH
+              value: /var/run/health/token.json
+          volumeMounts:
+            - name: token
+              mountPath: /var/run/health
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 20
+          # readyz additionally checks we hold a usable token, so an
+          # unauthorised pod shows as NotReady instead of failing silently.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: token
+          secret:
+            secretName: google-health-mcp
+            items:
+              - key: token.json
+                path: token.json
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: google-health-mcp
+spec:
+  selector:
+    app: google-health-mcp
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
