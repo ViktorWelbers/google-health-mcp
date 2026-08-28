@@ -1,111 +1,91 @@
 # google-health-mcp
 
-A small MCP server for the [Google Health API v4](https://developers.google.com/health) — the successor to the Fitbit Web API, covering Fitbit, Pixel Watch and partner devices.
+An MCP server for the Google Health API v4 (Fitbit, Pixel Watch, and partner devices).
 
-Single static Go binary, no runtime dependencies, ~15 MB container. Runs on stdio for local editors or over streamable HTTP for a cluster.
+Single static Go binary with no runtime dependencies. Runs over stdio for local editors or streamable HTTP for remote deployments.
 
 ## Design
 
-The server does **mechanical** work only:
+The server handles the transport and data flattening layer only:
 
-- OAuth, token refresh and persistence
-- Pagination, and chunking around the API's 14-day rollup ceiling
-- Collapsing verbose data-point JSON into `date, value` pairs
+* OAuth 2.0 flow, token refresh, and local storage
+* Pagination and 14-day chunking limits
+* Flattening raw data-point JSON into standard `(date, value)` pairs
 
-It deliberately does **not** interpret. There are no baselines, thresholds or verdicts baked in — it returns numbers and the agent draws the conclusions. An agent asking about recovery already knows things the server can't: training load, symptoms, what happened last week. Hard-coding "resting HR is 5 bpm up, you may be ill" is both less accurate and un-changeable without a redeploy.
+It does not interpret, baseline, or score metrics. It exposes structured data to the model.
 
 ## Tools
 
 | Tool | Purpose |
 | --- | --- |
-| `health_auth_status` | Is the server authorised, where is the token, when does it expire |
-| `health_data_types` | All 32 data types plus the named presets |
-| `health_daily_metrics` | Day-by-day values for one or more data types, as an aligned table |
-| `health_list_datapoints` | Raw data points with a pass-through AIP-160 `filter` — escape hatch |
+| `health_auth_status` | Returns auth status, token location, and expiry |
+| `health_data_types` | Lists available data types (32 total) and presets |
+| `health_daily_metrics` | Fetches daily metrics across types as an aligned table |
+| `health_list_datapoints` | Raw data point escape hatch with AIP-160 filter support |
 
-`health_daily_metrics` accepts either explicit `data_types` or a `preset`:
+`health_daily_metrics` accepts explicit `data_types` or a preset:
 
-- **`recovery`** — `daily-resting-heart-rate`, `daily-heart-rate-variability`, `daily-sleep-temperature-derivations`, `daily-oxygen-saturation`, `sleep`
-- **`training`** — `active-zone-minutes`, `active-energy-burned`, `total-calories`, `steps`, `exercise`
-- **`body`** — `weight`, `body-fat`, `vo2-max`, `blood-glucose`
+* **`recovery`**: `daily-resting-heart-rate`, `daily-heart-rate-variability`, `daily-sleep-temperature-derivations`, `daily-oxygen-saturation`
+* **`training`**: `active-zone-minutes`, `active-energy-burned`, `total-calories`, `steps`, `exercise`
+* **`body`**: `weight`, `body-fat`, `vo2-max`
 
 ## Setup
 
-Each user self-hosts and registers their own OAuth client, so their token never
-leaves their machine. No app verification, no shared data custody.
+Self-hosted OAuth. Tokens stay local on your machine.
 
-### 1. Google Cloud (about five minutes, free)
+### 1. Google Cloud Console
 
-You are not deploying anything to Google Cloud — the console is just where OAuth
-clients are registered. No billing card is needed for consumer OAuth access.
+1. Create or select a project in [Google Cloud Console](https://console.cloud.google.com).
+2. Enable the **Google Health API** (`health.googleapis.com`).
+3. Configure the **OAuth consent screen** (User Type: External, Status: Testing).
+4. Under **Test users**, add your Google email address.
+5. Create credentials: **OAuth client ID** -> **Web application**.
+6. Add the redirect URI:
 
-1. Create or select a project at [console.cloud.google.com](https://console.cloud.google.com).
-2. Enable the **Google Health API** (`health.googleapis.com`) from the API Library.
-3. **OAuth consent screen** → User Type **External**. Leave publishing status on **Testing**.
-4. Under **Test users**, click **+ Add users** and add your own Google account. Without this your own sign-in is rejected.
-5. **Credentials → Create credentials → OAuth client ID → Web application**.
-6. Under **Authorised redirect URIs** add exactly:
-
-   ```
+   ```text
    http://127.0.0.1:3000/callback
    ```
 
-   (Google's own quickstart suggests `https://www.google.com` — that is for the
-   OAuth Playground, not for this server.)
-7. Copy the **Client ID** and **Client Secret**.
+7. Save the Client ID and Client Secret (or download the client credentials JSON).
 
-> **Testing-mode caveat.** While publishing status is *Testing*, Google expires
-> refresh tokens after 7 days, so you would re-run `login` weekly. Switching the
-> status to *In production* — still unverified — is expected to lift that while
-> keeping the "unverified app" warning screen and the 100-user cap. Worth
-> confirming for your own project before relying on it.
->
-> Health API scopes are *restricted*, so a publicly verified app would need an
-> annual third-party CASA security assessment. Self-hosting sidesteps that
-> entirely: an unverified client supports up to 100 users, and you only ever
-> need one — yourself.
+> **Note:** In Testing mode, refresh tokens expire every 7 days. Switching the OAuth app status to "In Production" (unverified) avoids weekly re-auth while staying within the 100-user limit.
 
-### 2. Authorise
+### 2. Authentication
 
-Point the server at the credentials JSON you downloaded from the console:
+Place your `client.json` in the default config location (or pass `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` via environment variables):
 
 ```sh
 mkdir -p ~/.config/health-mcp
 cp ~/Downloads/client_secret_*.json ~/.config/health-mcp/client.json
 chmod 600 ~/.config/health-mcp/client.json
-export GOOGLE_OAUTH_CLIENT_FILE=~/.config/health-mcp/client.json
 
 go build -o health-mcp .
 ./health-mcp login
 ```
 
-`GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` still work if you prefer env vars,
-but the file keeps the secret in one `0600` location instead of copying it into
-shell profiles and editor configs.
+This opens a browser flow and saves tokens to `~/.config/health-mcp/token.json` (0600). Override path via `HEALTH_TOKEN_PATH`.
 
-This opens a browser, and writes a token to `~/.config/health-mcp/token.json`
-with mode `0600`. Override the location with `HEALTH_TOKEN_PATH`.
+Scopes requested (read-only):
 
-Scopes requested (all read-only — the server never writes health data):
+* `googlehealth.activity_and_fitness.readonly`
+* `googlehealth.health_metrics_and_measurements.readonly`
+* `googlehealth.sleep.readonly`
 
-```
-googlehealth.activity_and_fitness.readonly
-googlehealth.health_metrics_and_measurements.readonly
-googlehealth.sleep.readonly
-```
-
-Check it worked:
+Verify local status:
 
 ```sh
 ./health-mcp serve -http :8080 &
-curl -s localhost:8080/readyz     # "ready" once a usable token exists
+curl -s localhost:8080/readyz
 ```
 
-### 3. Run
+### 3. Usage
 
 ```sh
-./health-mcp serve                    # stdio
-./health-mcp serve -http :8080        # streamable HTTP at /mcp
+# stdio mode
+./health-mcp serve
+
+# HTTP mode
+./health-mcp serve -http :8080
 ```
 
 Register with Claude Code:
@@ -117,7 +97,7 @@ claude mcp add google-health \
   -- /path/to/health-mcp serve
 ```
 
-## Cluster deployment
+## Kubernetes / Container Deployment
 
 ```sh
 docker build -t ghcr.io/viktorwelbers/google-health-mcp:latest .
@@ -130,51 +110,38 @@ kubectl create secret generic google-health-mcp \
 kubectl apply -f k8s/deployment.yaml
 ```
 
-Runs as non-root on `scratch` with a read-only root filesystem and all capabilities dropped.
+Container characteristics:
 
-- `/healthz` — process is alive
-- `/readyz` — a usable token is present, so an unauthorised pod shows `NotReady` rather than failing silently
-- `/mcp` — the MCP endpoint
+* Runs non-root on `scratch`
+* Read-only root filesystem, dropped capabilities
+* Endpoints: `/healthz` (liveness), `/readyz` (readiness/auth check), `/mcp` (streamable HTTP)
 
-The token is mounted read-only. That's intentional: only the short-lived access token rotates and it's kept in memory, while the refresh token never changes, so a restart re-derives a valid access token. The server logs one warning per rotation about being unable to persist — expected and harmless.
+When running with a read-only token mount, access tokens refresh in memory while the mounted refresh token stays static. The server will log a harmless warning when failing to write refreshed credentials back to disk.
 
-## API notes
+## API Notes & Edge Cases
 
-Verified against the live API, because the reference docs leave these implicit:
+Implementation quirks observed in Google Health API v4:
 
-**`civilTimeInterval` uses `start` / `end`** — not the `startTime`/`endTime` of
-`google.type.Interval`, despite being documented as its counterpart.
+**Time interval schema:** `civilTimeInterval` expects `start` and `end` fields (differs from standard `google.type.Interval` `startTime`/`endTime`).
 
-**`daily-*` types do not support `dailyRollUp`.** They are already one point per
-day, and the API rejects rollup with *"supported: list, reconcile"*. The client
-picks the method per type: `List` for `daily-*`, `dailyRollUp` for the rest.
+**Aggregation:** Types prefixed with `daily-*` do not support `dailyRollUp`. The client automatically routes requests to `List` for `daily-*` types and `dailyRollUp` for all others.
 
-**Some numeric fields are quoted strings.** `daily-resting-heart-rate` returns
-`"beatsPerMinute": "59"`. Number parsing accepts both.
+**Type parsing:** Numeric values may be returned as integers, floats, or quoted strings (e.g., `"beatsPerMinute": "59"`). Parsers handle both string and numeric types.
 
-**The date sits at a different depth per type.** Rollup points carry
-`civilStartTime` at the top level; daily types nest `date` inside their value
-object; sampled types bury it under `weight.sampleTime.civilTime.date`. Date
-extraction searches recursively rather than assuming a path.
+**Date location:** Date strings vary by metric type (`civilStartTime` top-level vs. nested inside value objects or sample times). Date extraction recursively resolves these structures.
 
-**Every numeric field is returned, not just one.** A data point often carries
-several useful numbers — `daily-heart-rate-variability` has an average, a
-deep-sleep RMSSD, an entropy value and a non-REM heart rate. All of them appear
-in `values`; `primary_field` only chooses which one fills the rendered column,
-so an unmapped type still returns its full data.
+**Field mapping:** All fields inside a point are exposed in `values`. `primary_field` determines which metric maps to the primary output column for table views.
 
-Observed field names:
-
-| Data type | Primary field |
+| Data Type | Primary Field |
 | --- | --- |
 | `daily-resting-heart-rate` | `beatsPerMinute` |
 | `daily-heart-rate-variability` | `averageHeartRateVariabilityMilliseconds` |
 | `daily-oxygen-saturation` | `averagePercentage` |
-| `daily-sleep-temperature-derivations` | `nightlyTemperatureCelsius` (compare against `baselineTemperatureCelsius` in the same point) |
+| `daily-sleep-temperature-derivations` | `nightlyTemperatureCelsius` |
 | `weight` | `weightGrams` |
 
-Use `health_list_datapoints` to inspect the raw shape of any type.
+Run `health_list_datapoints` to view the unmapped schema for any specific type.
 
-## Licence
+## License
 
 MIT
