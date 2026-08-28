@@ -1,3 +1,6 @@
+# check=skip=SecretsUsedInArgOrEnv
+# ^ HEALTH_TOKEN_PATH is a filesystem path, not a credential. The check
+#   fires on the variable name alone; the token itself is mounted, never baked in.
 # ---- build ----
 FROM golang:1.27-alpine AS build
 
