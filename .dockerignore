@@ -1,0 +1,17 @@
+# Locally built binaries — the image builds its own inside the build stage.
+/health-mcp
+/google-health-mcp
+/dist/
+
+# Never let credentials into the build context.
+token.json
+*.token.json
+.env
+.env.*
+
+.git
+.github
+k8s
+*.md
+LICENSE
+.DS_Store
