@@ -95,15 +95,11 @@ type civilDateTime struct {
 }
 
 // civilTimeInterval is the closed-open [start, end) window used by rollup calls.
-//
-// NOTE: the JSON field names below (startTime/endTime, and the nested "date")
-// are taken from the RPC reference, which documents CivilTimeInterval as "a
-// counterpart of google.type.Interval, but using CivilDateTime". If a rollup
-// call ever returns INVALID_ARGUMENT about the range, this struct is the first
-// place to look — the API's own error message is passed through verbatim.
+// Field names confirmed against the live API: "start"/"end", not the
+// startTime/endTime that google.type.Interval uses.
 type civilTimeInterval struct {
-	StartTime civilDateTime `json:"startTime"`
-	EndTime   civilDateTime `json:"endTime"`
+	Start civilDateTime `json:"start"`
+	End   civilDateTime `json:"end"`
 }
 
 func toCivil(t time.Time) civilDateTime {
@@ -177,6 +173,27 @@ type dailyRollUpResponse struct {
 // We chunk every request to stay under it rather than special-casing types.
 const maxRollupWindow = 14 * 24 * time.Hour
 
+// SupportsRollup reports whether a data type can be aggregated server-side.
+// Types prefixed "daily-" are already one point per day and the API rejects
+// dailyRollUp on them ("supported: list, reconcile"), so they are read with
+// List instead.
+func SupportsRollup(dataType string) bool {
+	return !strings.HasPrefix(dataType, "daily-")
+}
+
+// Fetch reads a data type over a window using whichever method the API
+// supports for it. For daily types it lists the most recent `days` points,
+// which the API returns newest-first.
+func (c *Client) Fetch(ctx context.Context, dataType string, start, end time.Time, days int) ([]map[string]any, error) {
+	if SupportsRollup(dataType) {
+		return c.DailyRollUp(ctx, dataType, start, end)
+	}
+	if days <= 0 {
+		days = 30
+	}
+	return c.List(ctx, dataType, "", days, 1)
+}
+
 // DailyRollUp returns one aggregated point per day over [start, end).
 // Requests longer than 14 days are split automatically and stitched back
 // together, so callers can just ask for "the last 90 days".
@@ -203,7 +220,7 @@ func (c *Client) rollupWindow(ctx context.Context, dataType string, start, end t
 	token := ""
 	for page := 0; page < 10; page++ {
 		req := dailyRollUpRequest{
-			Range:          civilTimeInterval{StartTime: toCivil(start), EndTime: toCivil(end)},
+			Range:          civilTimeInterval{Start: toCivil(start), End: toCivil(end)},
 			WindowSizeDays: 1,
 			PageSize:       1000,
 			PageToken:      token,

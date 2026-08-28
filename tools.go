@@ -137,7 +137,7 @@ func (a *app) dailyMetrics(ctx context.Context, _ *mcp.CallToolRequest, in daily
 
 	out := dailyOut{Window: fmt.Sprintf("%s → %s", start.Format("2006-01-02"), end.AddDate(0, 0, -1).Format("2006-01-02"))}
 	for _, dt := range types {
-		points, err := c.DailyRollUp(ctx, dt, start, end)
+		points, err := c.Fetch(ctx, dt, start, end, in.Days)
 		if err != nil {
 			out.Series = append(out.Series, Series{DataType: dt, Error: err.Error()})
 			continue
@@ -177,10 +177,15 @@ func renderDaily(out dailyOut) string {
 	}
 	sort.Strings(dates)
 
-	// Header
+	// Header: data type on one line, the field supplying the column on the next,
+	// so the unit is never ambiguous.
 	fmt.Fprintf(&b, "%-12s", "date")
 	for _, s := range out.Series {
-		fmt.Fprintf(&b, " %14s", shortName(s.DataType))
+		fmt.Fprintf(&b, " %16s", shortName(s.DataType))
+	}
+	fmt.Fprintf(&b, "\n%-12s", "")
+	for _, s := range out.Series {
+		fmt.Fprintf(&b, " %16s", shortField(s.Field))
 	}
 	b.WriteString("\n")
 
@@ -196,9 +201,9 @@ func renderDaily(out dailyOut) string {
 		fmt.Fprintf(&b, "%-12s", date)
 		for i := range out.Series {
 			if v, ok := index[i][date]; ok {
-				fmt.Fprintf(&b, " %14.2f", v)
+				fmt.Fprintf(&b, " %16.2f", v)
 			} else {
-				fmt.Fprintf(&b, " %14s", "—")
+				fmt.Fprintf(&b, " %16s", "—")
 			}
 		}
 		b.WriteString("\n")
@@ -213,10 +218,23 @@ func renderDaily(out dailyOut) string {
 
 func shortName(dt string) string {
 	s := strings.TrimPrefix(dt, "daily-")
-	if len(s) > 14 {
-		s = s[:14]
+	if len(s) > 16 {
+		s = s[:16]
 	}
 	return s
+}
+
+// shortField trims the long descriptive field names the API uses
+// (averageHeartRateVariabilityMilliseconds) down to something a column can hold,
+// keeping the tail because that is where the unit lives.
+func shortField(f string) string {
+	if f == "" {
+		return ""
+	}
+	if len(f) > 16 {
+		return "…" + f[len(f)-15:]
+	}
+	return f
 }
 
 // ---------- health_list_datapoints ----------
