@@ -123,29 +123,60 @@ func saveToken(t *oauth2.Token) error {
 	return os.WriteFile(p, b, 0o600)
 }
 
-// persistingSource wraps a TokenSource and writes the token back to disk
-// whenever it is refreshed, so a long-lived server keeps working.
+// persistingSource wraps a TokenSource so a long-lived server keeps working:
+// it writes refreshed tokens back to disk, and — crucially — reloads the token
+// file if a refresh fails.
+//
+// That reload matters because refresh tokens die (Google expires them after 7
+// days while the OAuth app is in "Testing" publishing status). When that
+// happens the user re-runs `health-mcp login`, which writes a fresh token to
+// disk — but a server that captured its TokenSource at startup would keep
+// using the dead one forever and fail every call until restarted.
 type persistingSource struct {
 	mu   sync.Mutex
+	ctx  context.Context
+	cfg  *oauth2.Config
 	src  oauth2.TokenSource
 	last string
 }
 
 func (p *persistingSource) Token() (*oauth2.Token, error) {
-	t, err := p.src.Token()
-	if err != nil {
-		return nil, err
-	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if t.AccessToken != p.last {
-		p.last = t.AccessToken
-		if err := saveToken(t); err != nil {
-			// Non-fatal: we still have a usable token in memory.
-			fmt.Fprintf(os.Stderr, "warning: could not persist refreshed token: %v\n", err)
-		}
+
+	t, err := p.src.Token()
+	if err == nil {
+		p.persist(t)
+		return t, nil
 	}
+
+	// Refresh failed. A fresh `login` may have replaced the token on disk, so
+	// reload and retry once before reporting failure.
+	tok, loadErr := loadToken()
+	if loadErr != nil {
+		return nil, fmt.Errorf("token refresh failed and no token at %s — run `health-mcp login`: %w", tokenPath(), err)
+	}
+	p.src = p.cfg.TokenSource(p.ctx, tok)
+	t, retryErr := p.src.Token()
+	if retryErr != nil {
+		return nil, fmt.Errorf("token refresh failed even after reloading %s — run `health-mcp login`: %w", tokenPath(), retryErr)
+	}
+	p.persist(t)
 	return t, nil
+}
+
+// persist writes the token back to disk when the access token has rotated.
+// Caller must hold p.mu.
+func (p *persistingSource) persist(t *oauth2.Token) {
+	if t.AccessToken == p.last {
+		return
+	}
+	p.last = t.AccessToken
+	if err := saveToken(t); err != nil {
+		// Non-fatal: we still have a usable token in memory. Expected when the
+		// token is mounted read-only, e.g. from a Kubernetes secret.
+		fmt.Fprintf(os.Stderr, "warning: could not persist refreshed token: %v\n", err)
+	}
 }
 
 // httpClient returns an HTTP client that automatically attaches and refreshes
@@ -162,7 +193,12 @@ func httpClient(ctx context.Context) (*http.Client, error) {
 		}
 		return nil, err
 	}
-	ps := &persistingSource{src: cfg.TokenSource(ctx, tok), last: tok.AccessToken}
+	ps := &persistingSource{
+		ctx:  ctx,
+		cfg:  cfg,
+		src:  cfg.TokenSource(ctx, tok),
+		last: tok.AccessToken,
+	}
 	return oauth2.NewClient(ctx, ps), nil
 }
 

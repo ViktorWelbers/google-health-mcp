@@ -306,6 +306,13 @@ func (a *app) register(s *mcp.Server) {
 	}, a.dailyMetrics)
 
 	mcp.AddTool(s, &mcp.Tool{
+		Name: "health_workouts",
+		Description: "Every recorded activity over a date range — not just cycling. " +
+			"Returns type, duration, distance, elevation, average heart rate, calories and active-zone minutes per workout. " +
+			"Use this to see training load a cycling-only view misses: hikes, walks, runs and gym sessions all count.",
+	}, a.workouts)
+
+	mcp.AddTool(s, &mcp.Tool{
 		Name:        "health_list_datapoints",
 		Description: "Raw data point access with an optional pass-through AIP-160 filter. Escape hatch for intraday detail or queries the daily tool does not cover.",
 	}, a.listDatapoints)

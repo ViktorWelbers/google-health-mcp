@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -173,25 +174,33 @@ type dailyRollUpResponse struct {
 // We chunk every request to stay under it rather than special-casing types.
 const maxRollupWindow = 14 * 24 * time.Hour
 
-// SupportsRollup reports whether a data type can be aggregated server-side.
-// Types prefixed "daily-" are already one point per day and the API rejects
-// dailyRollUp on them ("supported: list, reconcile"), so they are read with
-// List instead.
-func SupportsRollup(dataType string) bool {
-	return !strings.HasPrefix(dataType, "daily-")
+// rollupUnsupported reports whether an error is the API telling us this data
+// type cannot be aggregated server-side.
+func rollupUnsupported(err error) bool {
+	var ae *apiError
+	return errors.As(err, &ae) && strings.Contains(ae.Body, "DailyRollup is not supported")
 }
 
 // Fetch reads a data type over a window using whichever method the API
-// supports for it. For daily types it lists the most recent `days` points,
-// which the API returns newest-first.
+// supports for it.
+//
+// Two families reject dailyRollUp: types already aggregated per day
+// ("daily-resting-heart-rate") and session-based ones ("exercise", "sleep").
+// Rather than maintain a hand-written list that silently rots as the API grows,
+// this tries rollup and falls back to List when the API says it is unsupported
+// — the fallback is self-correcting for data types we have never seen.
 func (c *Client) Fetch(ctx context.Context, dataType string, start, end time.Time, days int) ([]map[string]any, error) {
-	if SupportsRollup(dataType) {
-		return c.DailyRollUp(ctx, dataType, start, end)
-	}
 	if days <= 0 {
 		days = 30
 	}
-	return c.List(ctx, dataType, "", days, 1)
+	if strings.HasPrefix(dataType, "daily-") {
+		return c.List(ctx, dataType, "", days, 1)
+	}
+	points, err := c.DailyRollUp(ctx, dataType, start, end)
+	if err != nil && rollupUnsupported(err) {
+		return c.List(ctx, dataType, "", days, 1)
+	}
+	return points, err
 }
 
 // DailyRollUp returns one aggregated point per day over [start, end).
